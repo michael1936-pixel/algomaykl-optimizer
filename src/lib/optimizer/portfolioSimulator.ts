@@ -434,7 +434,7 @@ export function runBacktest(
           tpR = true; tpSteps = stepsCrossed;
           stepStopS = entryPrice * (1 - tpPct * tpSteps) * (1 + tpTrailDist / 100);
         }
-        let pf: number = trailStop ?? stopAtBarOpen ?? (baseSS ?? entryPrice * 1.02);
+        let pf = trailStop ?? stopAtBarOpen ?? (baseSS ?? entryPrice * 1.02);
         let fs: number;
         if (rsi <= rsiThr && trOnlyS !== null) fs = trOnlyS;
         else if (tpR && stepStopS !== null) fs = stepStopS;

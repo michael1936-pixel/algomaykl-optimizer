@@ -1,160 +1,152 @@
 import express from 'express';
-import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
-import { runSmartOptimization, OPTIMIZER_BUILD } from './lib/optimizer/smartOptimizer';
-import type { SymbolData, PeriodSplit, ExtendedStocksOptimizationConfig } from './lib/optimizer/types';
+import { runSmartOptimization, SmartProgressInfo, OPTIMIZER_BUILD } from './lib/optimizer/smartOptimizer';
+import { NNE_PRESET_CONFIG } from './lib/optimizer/presetConfigs';
+import type { SymbolData, PeriodSplit, ExtendedStocksOptimizationConfig, Trade } from './lib/optimizer/types';
 
 const app = express();
-app.use(cors());
 app.use(express.json({ limit: '200mb' }));
 
-const PORT = parseInt(process.env.PORT || '3000', 10);
+const PORT = Number(process.env.PORT) || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
-function getSupabase() {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    console.warn('Supabase not configured — progress updates disabled');
-    return null;
-  }
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-}
-
-// ─── Health ───
 app.get('/health', (_req, res) => {
-  res.json({
-    status: 'ok',
-    build: OPTIMIZER_BUILD,
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
-    timestamp: new Date().toISOString(),
-  });
+  res.json({ status: 'ok', build: OPTIMIZER_BUILD, timestamp: new Date().toISOString() });
 });
 
-// ─── Optimize ───
 app.post('/api/optimize', async (req, res) => {
-  const { symbolsData, config, periodSplit, runId, simulationConfig, mode } = req.body;
+  const { runId, symbolsData, periodSplit: rawSplit, enabledStages } = req.body;
 
-  if (!symbolsData || !config || !periodSplit) {
-    return res.status(400).json({ error: 'Missing symbolsData, config, or periodSplit' });
+  if (!runId || !symbolsData || !rawSplit) {
+    return res.status(400).json({ error: 'Missing runId, symbolsData, or periodSplit' });
   }
 
-  console.log(`\n════ Optimization request ════`);
-  console.log(`Build: ${OPTIMIZER_BUILD}`);
-  console.log(`RunID: ${runId || 'none'}`);
-  console.log(`Symbols: ${(symbolsData as SymbolData[]).map((s: SymbolData) => `${s.symbol}(${s.candles.length})`).join(', ')}`);
+  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-  const supabase = getSupabase();
-  let lastUpdateTime = 0;
-
-  // Reconstruct Date objects from ISO strings
-  const ps: PeriodSplit = {
-    ...periodSplit,
-    trainStartDate: new Date(periodSplit.trainStartDate),
-    trainEndDate: new Date(periodSplit.trainEndDate),
-    testStartDate: new Date(periodSplit.testStartDate),
-    testEndDate: new Date(periodSplit.testEndDate),
+  const periodSplit: PeriodSplit = {
+    trainStartDate: new Date(rawSplit.trainStartDate),
+    trainEndDate: new Date(rawSplit.trainEndDate),
+    testStartDate: new Date(rawSplit.testStartDate),
+    testEndDate: new Date(rawSplit.testEndDate),
+    trainPercent: rawSplit.trainPercent,
   };
 
-  // Set run to running
-  if (supabase && runId) {
-    await supabase.from('optimization_runs').update({
-      status: 'running',
-      current_stage: 1,
-    }).eq('id', runId);
-  }
+  // Mark run as running
+  await supabase.from('optimization_runs').update({
+    status: 'running',
+    updated_at: new Date().toISOString(),
+  }).eq('id', runId);
 
-  // Abort check: query DB for cancellation
-  const abortCheckFn = supabase && runId ? async (): Promise<boolean> => {
-    try {
-      const { data } = await supabase.from('optimization_runs').select('status').eq('id', runId).single();
-      return data?.status === 'cancelled';
-    } catch { return false; }
-  } : undefined;
+  res.json({ status: 'started', runId, build: OPTIMIZER_BUILD });
 
+  // Run optimization in background
   try {
-    const result = await runSmartOptimization(
-      symbolsData as SymbolData[],
-      config as ExtendedStocksOptimizationConfig,
-      ps,
-      mode || 'single',
-      simulationConfig || {},
-      // onProgress
-      async (info: any) => {
-        const now = Date.now();
-        if (now - lastUpdateTime < 3000) return; // throttle to 3s
-        lastUpdateTime = now;
+    const config = NNE_PRESET_CONFIG as ExtendedStocksOptimizationConfig;
+    let lastProgressUpdate = 0;
 
-        if (supabase && runId) {
-          await supabase.from('optimization_runs').update({
-            current_stage: info.currentStage || 1,
-            total_stages: info.totalStages || 30,
-            current_combo: info.current || 0,
-            total_combos: info.total || 0,
-            best_train: info.bestReturn ?? null,
-            best_test: info.bestTestReturn ?? null,
-          }).eq('id', runId);
-        }
+    const result = await runSmartOptimization(
+      symbolsData,
+      config,
+      periodSplit,
+      'single',
+      {},
+      async (info: SmartProgressInfo) => {
+        const now = Date.now();
+        if (now - lastProgressUpdate < 3000 && info.current < info.total) return;
+        lastProgressUpdate = now;
+
+        await supabase.from('optimization_runs').update({
+          current_stage: info.currentStage,
+          total_stages: info.totalStages,
+          current_combo: info.current,
+          total_combos: info.total,
+          best_train: info.bestReturn ?? null,
+          best_test: info.bestTestReturn ?? null,
+          updated_at: new Date().toISOString(),
+        }).eq('id', runId);
       },
-      undefined, // abortSignal (not used server-side)
-      false, // useMemory
+      undefined, // abortSignal
+      false,
       'profit',
-      true, // enableRound2
-      true, // enableRound3
-      undefined, // enabledStages
-      undefined, // onSkipStageCallback
-      undefined, // onSaveState
-      undefined, // savedState
-      4, // round1StepMultiplier
-      10, // numGoodZones
-      1, // zoneExpansionSteps
-      abortCheckFn,
+      true,
+      true,
+      enabledStages,
+      undefined, undefined, undefined,
+      4, 10, 1,
+      async () => {
+        const { data } = await supabase
+          .from('optimization_runs')
+          .select('status')
+          .eq('id', runId)
+          .single();
+        return data?.status === 'cancelled';
+      },
     );
 
     // Save final result
-    if (supabase && runId) {
-      const best = result.finalResult.bestForProfit;
-      await supabase.from('optimization_runs').update({
-        status: 'completed',
-        best_train: best?.totalTrainReturn ?? null,
-        best_test: best?.totalTestReturn ?? null,
-      }).eq('id', runId);
+    const finalResult = result.finalResult?.bestForProfit;
+    if (finalResult) {
+      const params = finalResult.parameters;
+      const trainResult = finalResult.trainResults?.[0]?.result;
+      const testResult = finalResult.testResults?.[0]?.result;
 
-      // Save to optimization_results
-      if (best) {
-        const params = best.parameters;
-        const trainResult = best.trainResults?.[0]?.result;
-        await supabase.from('optimization_results').insert({
-          symbol: (symbolsData as SymbolData[])[0]?.symbol || 'UNKNOWN',
-          parameters: params as any,
-          train_return: best.totalTrainReturn,
-          test_return: best.totalTestReturn,
-          win_rate: trainResult?.winRate ?? null,
-          max_drawdown: trainResult?.maxDrawdown ?? null,
-          sharpe_ratio: trainResult?.sharpeRatio ?? null,
-          total_trades: trainResult?.totalTrades ?? null,
-          is_active: true,
-          optimized_at: new Date().toISOString(),
-        });
+      const { data: optResult } = await supabase.from('optimization_results').insert({
+        symbol: symbolsData[0]?.symbol || 'UNKNOWN',
+        parameters: params as any,
+        train_return: finalResult.totalTrainReturn,
+        test_return: finalResult.totalTestReturn,
+        win_rate: trainResult?.winRate ?? null,
+        max_drawdown: trainResult?.maxDrawdown ?? null,
+        sharpe_ratio: trainResult?.sharpeRatio ?? null,
+        total_trades: trainResult?.totalTrades ?? null,
+        is_active: true,
+        optimized_at: new Date().toISOString(),
+      }).select('id').single();
+
+      // Save trades
+      if (optResult?.id && trainResult?.trades) {
+        const allTrades = [
+          ...trainResult.trades.map((t: Trade) => ({ ...t, phase: 'train' })),
+          ...(testResult?.trades || []).map((t: Trade) => ({ ...t, phase: 'test' })),
+        ];
+
+        const tradeBatch = allTrades.slice(0, 500).map((t: Trade & { phase: string }) => ({
+          optimization_result_id: optResult.id,
+          symbol: symbolsData[0]?.symbol || 'UNKNOWN',
+          direction: t.type,
+          entry_price: t.entryPrice,
+          entry_time: new Date(t.entryTime).toISOString(),
+          exit_price: t.exitPrice ?? null,
+          exit_time: t.exitTime ? new Date(t.exitTime).toISOString() : null,
+          exit_reason: t.exitReason ?? null,
+          pnl_pct: t.pnlPct ?? null,
+          bars_held: t.barsInTrade ?? null,
+          strategy: t.entryStrategyId != null ? `S${t.entryStrategyId}` : null,
+        }));
+
+        if (tradeBatch.length > 0) {
+          await supabase.from('optimization_trades').insert(tradeBatch);
+        }
       }
     }
 
-    console.log(`✓ Optimization complete. Train: ${result.finalResult.bestForProfit?.totalTrainReturn?.toFixed(2)}% Test: ${result.finalResult.bestForProfit?.totalTestReturn?.toFixed(2)}%`);
-    res.json({ success: true, result: result.finalResult, stageResults: result.stageResults });
+    await supabase.from('optimization_runs').update({
+      status: result.wasStopped ? 'cancelled' : 'completed',
+      updated_at: new Date().toISOString(),
+    }).eq('id', runId);
+
+    console.log(`✅ Optimization ${runId} completed. Build: ${OPTIMIZER_BUILD}`);
   } catch (error: any) {
-    console.error('Optimization error:', error.message);
-    if (supabase && runId) {
-      await supabase.from('optimization_runs').update({
-        status: 'failed',
-        error_message: error.message?.slice(0, 500),
-      }).eq('id', runId);
-    }
-    res.status(500).json({ error: error.message });
+    console.error(`❌ Optimization ${runId} failed:`, error.message);
+    await supabase.from('optimization_runs').update({
+      status: 'failed',
+      error_message: error.message?.slice(0, 500),
+      updated_at: new Date().toISOString(),
+    }).eq('id', runId);
   }
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n🚀 Optimizer server running on port ${PORT}`);
-  console.log(`   Build: ${OPTIMIZER_BUILD}`);
-  console.log(`   Supabase: ${SUPABASE_URL ? 'configured' : 'NOT configured'}`);
+  console.log(`🚀 Railway Optimizer listening on port ${PORT} | Build: ${OPTIMIZER_BUILD}`);
 });
