@@ -1,6 +1,7 @@
 /**
  * Portfolio Optimizer — from server
  * Runs combinations with CombinationCache, preFilterSymbols, indicatorCache
+ * v18: Worker thread support for parallel execution
  */
 import type {
   SymbolData, PeriodSplit, ExtendedStocksOptimizationConfig,
@@ -8,6 +9,7 @@ import type {
 } from './types';
 import { runPortfolioBacktest, preFilterSymbols, PreFilteredSymbolData } from './portfolioSimulator';
 import { IndicatorCacheManager } from './indicatorCache';
+import { WorkerPool, WorkerResult } from './workerPool';
 
 /** Insert into a sorted-descending top-N array, maintaining max size */
 function insertTopN(
@@ -16,7 +18,6 @@ function insertTopN(
   maxN: number
 ) {
   if (arr.length >= maxN && item.trainReturn <= arr[arr.length - 1].trainReturn) return;
-  // Binary insert
   let lo = 0, hi = arr.length;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
@@ -113,6 +114,52 @@ export function markBestCacheEntryProtected(cache: CombinationCache, stage: numb
   if (bestKey) { const e = cache.get(bestKey); if (e) e.protected = true; }
 }
 
+/** Minimum combos threshold for using worker threads */
+const WORKER_THRESHOLD = 500;
+
+/** Shared worker pool instance — reused across stages */
+let sharedPool: WorkerPool | null = null;
+
+function getWorkerPool(): WorkerPool {
+  if (!sharedPool) {
+    sharedPool = new WorkerPool();
+    console.log(`[WorkerPool] Created pool with ${sharedPool.getWorkerCount()} workers`);
+  }
+  return sharedPool;
+}
+
+/** Check if we're in a Node.js environment with worker_threads */
+function canUseWorkers(): boolean {
+  try {
+    require('worker_threads');
+    return typeof process !== 'undefined' && typeof process.versions?.node === 'string';
+  } catch {
+    return false;
+  }
+}
+
+function buildParamsFromCombo(combo: Record<string, number>, ext: any): ExtendedStocksStrategyParameters {
+  return {
+    ...combo,
+    non_regress_stop: ext.non_regress_stop, prefer_tp_priority: ext.prefer_tp_priority,
+    close_only_trail: ext.close_only_trail, allow_flip_L2S: ext.allow_flip_L2S, allow_flip_S2L: ext.allow_flip_S2L,
+    signals_on_close: ext.signals_on_close ?? true,
+    avoid_opening_bar: combo.avoid_opening_bar === 1, block_close_bar: combo.block_close_bar === 1,
+    use_big_bar_filter: combo.use_big_bar_filter === 1, use_dist_filter: combo.use_dist_filter === 1,
+    use_post_trail_tighten: combo.use_post_trail_tighten === 1, use_min_bars_post_trail: combo.use_min_bars_post_trail === 1,
+    use_atr_sl: combo.use_atr_sl === 1, enable_rsi_exit: combo.enable_rsi_exit === 1,
+    enable_strat1: combo.enable_strat1 === 1, enable_strat2: combo.enable_strat2 === 1,
+    enable_strat3: combo.enable_strat3 === 1, enable_strat4: combo.enable_strat4 === 1,
+    enable_strat5: combo.enable_strat5 === 1,
+    bb2_use_trend_filter: combo.bb2_use_trend_filter === 1, s3_use_vol_filter: combo.s3_use_vol_filter === 1,
+    s4_use_trend_filter: combo.s4_use_trend_filter === 1, s5_use_vol_filter: combo.s5_use_vol_filter === 1,
+    exit_all_now: false, block_new_entries: false,
+    use_vix_range_filter: false, vix_normal_min: 10, vix_normal_max: 30,
+    use_vix_exit_long: false, use_vix_exit_short: false, use_vix_freeze: false,
+    vix_lookback_bars: 1, vix_spike_pct: 8, vix_freeze_bars: 1,
+  } as ExtendedStocksStrategyParameters;
+}
+
 export async function optimizePortfolio(
   symbolsData: SymbolData[],
   config: ExtendedStocksOptimizationConfig,
@@ -162,9 +209,11 @@ export async function optimizePortfolio(
   const allResults: Array<{ params: ExtendedStocksStrategyParameters; trainReturn: number }> = [];
   const startTime = Date.now();
 
-  // Generate combinations iteratively
+  // Generate ALL combinations first
   const indices = new Array(rangeKeys.length).fill(0);
   const lengths = rangeArrays.map(a => a.length);
+
+  const uncachedCombos: Array<{ params: ExtendedStocksStrategyParameters; key: string }> = [];
 
   for (let iter = 0; iter < totalCombos; iter++) {
     if (signal?.aborted) break;
@@ -172,40 +221,87 @@ export async function optimizePortfolio(
     const combo: Record<string, number> = {};
     for (let j = 0; j < rangeKeys.length; j++) combo[rangeKeys[j]] = rangeArrays[j][indices[j]];
 
-    const params = {
-      ...combo,
-      non_regress_stop: ext.non_regress_stop, prefer_tp_priority: ext.prefer_tp_priority,
-      close_only_trail: ext.close_only_trail, allow_flip_L2S: ext.allow_flip_L2S, allow_flip_S2L: ext.allow_flip_S2L,
-      signals_on_close: ext.signals_on_close ?? true,
-      avoid_opening_bar: combo.avoid_opening_bar === 1, block_close_bar: combo.block_close_bar === 1,
-      use_big_bar_filter: combo.use_big_bar_filter === 1, use_dist_filter: combo.use_dist_filter === 1,
-      use_post_trail_tighten: combo.use_post_trail_tighten === 1, use_min_bars_post_trail: combo.use_min_bars_post_trail === 1,
-      use_atr_sl: combo.use_atr_sl === 1, enable_rsi_exit: combo.enable_rsi_exit === 1,
-      enable_strat1: combo.enable_strat1 === 1, enable_strat2: combo.enable_strat2 === 1,
-      enable_strat3: combo.enable_strat3 === 1, enable_strat4: combo.enable_strat4 === 1,
-      enable_strat5: combo.enable_strat5 === 1,
-      bb2_use_trend_filter: combo.bb2_use_trend_filter === 1, s3_use_vol_filter: combo.s3_use_vol_filter === 1,
-      s4_use_trend_filter: combo.s4_use_trend_filter === 1, s5_use_vol_filter: combo.s5_use_vol_filter === 1,
-      exit_all_now: false, block_new_entries: false,
-      use_vix_range_filter: false, vix_normal_min: 10, vix_normal_max: 30,
-      use_vix_exit_long: false, use_vix_exit_short: false, use_vix_freeze: false,
-      vix_lookback_bars: 1, vix_spike_pct: 8, vix_freeze_bars: 1,
-    } as ExtendedStocksStrategyParameters;
-
+    const params = buildParamsFromCombo(combo, ext);
     const key = comboKey(params);
 
     if (combinationCache?.has(key)) {
       const cached = combinationCache.get(key)!;
       cacheHits++;
+      current++;
       if (cached.trainReturn > bestTrainReturn) { bestTrainReturn = cached.trainReturn; bestTestReturn = cached.testReturn; }
       if (collectAllResults) insertTopN(allResults, { params, trainReturn: cached.trainReturn }, 200);
-      current++;
     } else {
+      uncachedCombos.push({ params, key });
+    }
+
+    // Advance indices
+    for (let j = rangeKeys.length - 1; j >= 0; j--) {
+      indices[j]++;
+      if (indices[j] < lengths[j]) break;
+      indices[j] = 0;
+    }
+  }
+
+  console.log(`[Optimizer] Total: ${totalCombos}, Cached: ${cacheHits}, To compute: ${uncachedCombos.length}`);
+
+  // Decide: parallel workers or sequential
+  const useWorkers = canUseWorkers() && uncachedCombos.length >= WORKER_THRESHOLD;
+
+  if (useWorkers) {
+    // ═══ PARALLEL PATH: Worker Threads ═══
+    console.log(`[Optimizer] Using worker threads for ${uncachedCombos.length} combinations`);
+    const pool = getWorkerPool();
+
+    let workerProcessed = 0;
+    const workerResults = await pool.runBatch(
+      uncachedCombos, symbolsData, periodSplit, mode, simConfig, preFiltered!,
+      (processed) => {
+        workerProcessed = processed;
+        current = cacheHits + workerProcessed;
+        const elapsed = (Date.now() - startTime) / 1000;
+        const cps = current / Math.max(elapsed, 0.001);
+        onProgress({ current, total: totalCombos, bestReturn: bestTrainReturn, bestTestReturn, combinationsPerSecond: cps, elapsedTime: elapsed, cacheHits, cacheSize: combinationCache?.size });
+      }
+    );
+
+    // Process worker results
+    for (const wr of workerResults) {
+      if (wr.valid && wr.portfolioResult) {
+        const portfolioResult = {
+          mode: preFiltered!.length === 1 ? 'single' as const : 'portfolio' as const,
+          trainPeriod: periodSplit,
+          trainResults: wr.portfolioResult.trainResults,
+          testResults: wr.portfolioResult.testResults,
+          totalTrainReturn: wr.trainReturn,
+          totalTestReturn: wr.testReturn,
+          overfit: wr.trainReturn > 0 ? Math.abs(wr.trainReturn - wr.testReturn) / wr.trainReturn : 0,
+          parameters: wr.params, monthlyPerformance: [], initialCapital: 10000,
+        };
+        multiResult = updateMultiObjectiveResult(multiResult, portfolioResult);
+        if (wr.trainReturn > bestTrainReturn) { bestTrainReturn = wr.trainReturn; bestTestReturn = wr.testReturn; }
+        if (combinationCache) {
+          combinationCache.set(wr.key, {
+            parameters: wr.params, trainReturn: wr.trainReturn, testReturn: wr.testReturn,
+            stageNumber, roundNumber, timestamp: Date.now(),
+            strategyEnables: { enable_strat1: wr.params.enable_strat1, enable_strat2: wr.params.enable_strat2, enable_strat3: wr.params.enable_strat3, enable_strat4: wr.params.enable_strat4, enable_strat5: wr.params.enable_strat5 },
+          });
+        }
+        if (collectAllResults) insertTopN(allResults, { params: wr.params, trainReturn: wr.trainReturn }, 200);
+      }
+    }
+    current = totalCombos;
+  } else {
+    // ═══ SEQUENTIAL PATH: Main thread (original logic) ═══
+    for (let i = 0; i < uncachedCombos.length; i++) {
+      if (signal?.aborted) break;
+
+      const { params, key } = uncachedCombos[i];
       const result = runPortfolioBacktest(symbolsData, params, periodSplit, mode, simConfig, preFiltered, indicatorCache);
-      current++;
+      current = cacheHits + i + 1;
+
       if (typeof result.totalTrainReturn === 'number' && !isNaN(result.totalTrainReturn)) {
         const portfolioResult = {
-          mode: preFiltered.length === 1 ? 'single' as const : 'portfolio' as const,
+          mode: preFiltered!.length === 1 ? 'single' as const : 'portfolio' as const,
           trainPeriod: periodSplit,
           trainResults: result.trainResults.map((r: any) => ({ ...r, result: { ...r.result, trades: [] } })),
           testResults: result.testResults.map((r: any) => ({ ...r, result: { ...r.result, trades: [] } })),
@@ -224,24 +320,19 @@ export async function optimizePortfolio(
         }
         if (collectAllResults) insertTopN(allResults, { params, trainReturn: result.totalTrainReturn }, 200);
       }
-    }
 
-
-    // Progress
-    if (current % 500 === 0 || current === totalCombos) {
-      const elapsed = (Date.now() - startTime) / 1000;
-      const cps = current / Math.max(elapsed, 0.001);
-      onProgress({ current, total: totalCombos, bestReturn: bestTrainReturn, bestTestReturn, combinationsPerSecond: cps, elapsedTime: elapsed, cacheHits, cacheSize: combinationCache?.size });
-      await new Promise(r => setTimeout(r, 0));
-    }
-
-    // Advance indices
-    for (let j = rangeKeys.length - 1; j >= 0; j--) {
-      indices[j]++;
-      if (indices[j] < lengths[j]) break;
-      indices[j] = 0;
+      if (current % 500 === 0 || i === uncachedCombos.length - 1) {
+        const elapsed = (Date.now() - startTime) / 1000;
+        const cps = current / Math.max(elapsed, 0.001);
+        onProgress({ current, total: totalCombos, bestReturn: bestTrainReturn, bestTestReturn, combinationsPerSecond: cps, elapsedTime: elapsed, cacheHits, cacheSize: combinationCache?.size });
+        await new Promise(r => setTimeout(r, 0));
+      }
     }
   }
+
+  // Final progress
+  const elapsed = (Date.now() - startTime) / 1000;
+  onProgress({ current: totalCombos, total: totalCombos, bestReturn: bestTrainReturn, bestTestReturn, combinationsPerSecond: totalCombos / Math.max(elapsed, 0.001), elapsedTime: elapsed, cacheHits, cacheSize: combinationCache?.size });
 
   const finalResult: any = {
     bestForProfit: multiResult.bestForProfit ? { ...multiResult.bestForProfit, actualTestedCount: current, stageCacheHits: cacheHits, stageNewCombinations: current - cacheHits } : null,
