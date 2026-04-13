@@ -228,7 +228,7 @@ export async function optimizePortfolio(
 
 
     // Progress
-    if (current % 10 === 0 || current === totalCombos) {
+    if (current % 500 === 0 || current === totalCombos) {
       const elapsed = (Date.now() - startTime) / 1000;
       const cps = current / Math.max(elapsed, 0.001);
       onProgress({ current, total: totalCombos, bestReturn: bestTrainReturn, bestTestReturn, combinationsPerSecond: cps, elapsedTime: elapsed, cacheHits, cacheSize: combinationCache?.size });

@@ -107,6 +107,9 @@ export function precomputeIndicators(candles: Candle[], params: ExtendedStocksSt
   const adxCalcArr = calculateADXPine(highs, lows, closes, params.s1_adx_len ?? 14);
   const bbCalc = calculateBBPine(closes, params.s1_bb_len ?? 20, params.s1_bb_mult ?? 2.2);
 
+  // S2 BB — compute ONCE instead of 3 times
+  const s2BbCalc = calculateBBPine(closes, params.bb2_bb_len ?? 20, params.bb2_bb_mult ?? 2.2);
+
   const indicators: StrategyIndicators = {
     rsi: rsiArr, ema9: ema9Arr, ema21: ema21Arr, ema50: emaTrendArr,
     ema100: ema100Arr, atr: atrArr, atrAvg: avgAtrArr, adx: adxCalcArr,
@@ -114,9 +117,9 @@ export function precomputeIndicators(candles: Candle[], params: ExtendedStocksSt
     volumeAvg: volMaArr, highs, lows,
     // S2 specific
     s2Adx: calculateADXPine(highs, lows, closes, params.bb2_adx_len ?? 11),
-    s2BbBasis: calculateBBPine(closes, params.bb2_bb_len ?? 20, params.bb2_bb_mult ?? 2.2).basis,
-    s2BbUpper: calculateBBPine(closes, params.bb2_bb_len ?? 20, params.bb2_bb_mult ?? 2.2).upper,
-    s2BbLower: calculateBBPine(closes, params.bb2_bb_len ?? 20, params.bb2_bb_mult ?? 2.2).lower,
+    s2BbBasis: s2BbCalc.basis,
+    s2BbUpper: s2BbCalc.upper,
+    s2BbLower: s2BbCalc.lower,
     s2Ema100: calculateEMAPine(closes, params.bb2_ma_len ?? 100),
   };
 
@@ -133,37 +136,17 @@ export class IndicatorCacheManager {
   private cache = new Map<string, PrecomputedData>();
   private hits = 0;
   private misses = 0;
-  private maxSize = 500; // LRU limit — 24GB RAM can hold many entries
-
-  /** Dynamically reduce cache size for memory-constrained stages */
-  setMaxSize(size: number) {
-    this.maxSize = size;
-    // Evict if currently over new limit
-    while (this.cache.size > this.maxSize) {
-      const firstKey = this.cache.keys().next().value;
-      if (firstKey !== undefined) this.cache.delete(firstKey);
-      else break;
-    }
-  }
 
   getOrCompute(candles: Candle[], params: ExtendedStocksStrategyParameters, datasetId?: string): PrecomputedData {
     const key = getIndicatorParamsKey(params, datasetId);
     const cached = this.cache.get(key);
     if (cached) {
       this.hits++;
-      // Move to end (most recently used)
-      this.cache.delete(key);
-      this.cache.set(key, cached);
       return cached;
     }
     this.misses++;
     const data = precomputeIndicators(candles, params);
     this.cache.set(key, data);
-    // Evict oldest entry if over limit
-    if (this.cache.size > this.maxSize) {
-      const firstKey = this.cache.keys().next().value;
-      if (firstKey !== undefined) this.cache.delete(firstKey);
-    }
     return data;
   }
 

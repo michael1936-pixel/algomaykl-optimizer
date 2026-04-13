@@ -76,8 +76,13 @@ export function compareForLowDrawdown(current: PortfolioOptimizationResult | nul
   return getMaxDrawdown(candidate) < getMaxDrawdown(current);
 }
 
+export function compareForTestPeriod(current: PortfolioOptimizationResult | null, candidate: PortfolioOptimizationResult): boolean {
+  if (!current) return true;
+  return candidate.totalTestReturn > current.totalTestReturn;
+}
+
 export function createEmptyMultiObjectiveResult(selectedObjective: ObjectiveType = 'profit'): MultiObjectiveResult {
-  return { bestForProfit: null, bestForConsistency: null, bestForLowDrawdown: null, selectedObjective, consistencyMetrics: {} };
+  return { bestForProfit: null, bestForConsistency: null, bestForLowDrawdown: null, bestForTestPeriod: null, selectedObjective, consistencyMetrics: {} };
 }
 
 export function updateMultiObjectiveResult(multiResult: MultiObjectiveResult, candidate: PortfolioOptimizationResult): MultiObjectiveResult {
@@ -86,6 +91,7 @@ export function updateMultiObjectiveResult(multiResult: MultiObjectiveResult, ca
   if (compareForProfit(multiResult.bestForProfit, candidate)) { updated.bestForProfit = candidate; updated.consistencyMetrics!.profit = candidateConsistencyMetrics; }
   if (compareForConsistency(multiResult.bestForConsistency, candidate, multiResult.consistencyMetrics?.consistency, candidateConsistencyMetrics)) { updated.bestForConsistency = candidate; updated.consistencyMetrics!.consistency = candidateConsistencyMetrics; }
   if (compareForLowDrawdown(multiResult.bestForLowDrawdown, candidate)) { updated.bestForLowDrawdown = candidate; updated.consistencyMetrics!.lowDrawdown = candidateConsistencyMetrics; }
+  if (compareForTestPeriod(multiResult.bestForTestPeriod, candidate)) { updated.bestForTestPeriod = candidate; updated.consistencyMetrics!.testPeriod = candidateConsistencyMetrics; }
   return updated;
 }
 
@@ -94,6 +100,7 @@ export function evaluateObjective(result: PortfolioOptimizationResult, objective
     case 'profit': return (result.totalTrainReturn + result.totalTestReturn) / 2;
     case 'consistency': return calculateConsistencyMetrics(result.monthlyPerformance).consistencyScore;
     case 'lowDrawdown': return -Math.abs(getMaxDrawdown(result));
+    case 'testPeriod': return result.totalTestReturn;
     default: return (result.totalTrainReturn + result.totalTestReturn) / 2;
   }
 }

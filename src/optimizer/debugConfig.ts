@@ -29,4 +29,4 @@ export const ENABLE_TRADE_LEDGER = false;
 export const ENABLE_TRADE_IDX_DEBUG = false;
 export const TRADE_IDX_DEBUG_SET = new Set<number>();
 export const ENABLE_EXIT_TIMING_TRACE = false;
-export const EXIT_TIMING_TRACE_INDICES = new Set<number>();
+export const ENABLE_SMART_OPTIMIZER_LOGS = false;

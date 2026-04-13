@@ -369,7 +369,7 @@ export interface PortfolioOptimizationResult {
   filteringActive?: boolean;
 }
 
-export type ObjectiveType = 'profit' | 'consistency' | 'lowDrawdown';
+export type ObjectiveType = 'profit' | 'consistency' | 'lowDrawdown' | 'testPeriod';
 
 export interface ConsistencyMetrics {
   monthlyReturnStdDev: number;
@@ -385,11 +385,13 @@ export interface MultiObjectiveResult {
   bestForProfit: PortfolioOptimizationResult | null;
   bestForConsistency: PortfolioOptimizationResult | null;
   bestForLowDrawdown: PortfolioOptimizationResult | null;
+  bestForTestPeriod: PortfolioOptimizationResult | null;
   selectedObjective: ObjectiveType;
   consistencyMetrics?: {
     profit?: ConsistencyMetrics;
     consistency?: ConsistencyMetrics;
     lowDrawdown?: ConsistencyMetrics;
+    testPeriod?: ConsistencyMetrics;
   };
 }
 

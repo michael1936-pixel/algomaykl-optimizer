@@ -80,15 +80,6 @@ function parseTimestamp(value: string | undefined): number | null {
   return !isNaN(date.getTime()) ? date.getTime() : null;
 }
 
-export function readCSVFile(file: File): Promise<Candle[]> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (event) => { try { resolve(parseCSV(event.target?.result as string)); } catch (error) { reject(error); } };
-    reader.onerror = () => reject(new Error('Failed to read file'));
-    reader.readAsText(file);
-  });
-}
-
 export function detectTickerFromCSV(csvText: string, fileName: string): string {
   const nameWithoutExt = fileName.replace(/\.(csv|txt)$/i, '');
   const tickerMatch = nameWithoutExt.match(/^([A-Z]{1,5})/i);
