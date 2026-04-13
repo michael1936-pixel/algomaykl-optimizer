@@ -80,7 +80,7 @@ app.post('/api/optimize', async (req, res) => {
       mode || 'single',
       simulationConfig || {},
       // onProgress
-      async (info) => {
+      async (info: any) => {
         const now = Date.now();
         if (now - lastUpdateTime < 3000) return; // throttle to 3s
         lastUpdateTime = now;
