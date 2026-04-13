@@ -5,7 +5,6 @@ import { runSmartOptimization, OPTIMIZER_BUILD } from './optimizer/smartOptimize
 import type { SmartProgressInfo } from './optimizer/smartOptimizer';
 import { NNE_PRESET_CONFIG } from './optimizer/presetConfigs';
 import type { SymbolData, PeriodSplit, ExtendedStocksOptimizationConfig } from './optimizer/types';
-import { parseCSV } from './optimizer/csvParser';
 
 const app = express();
 app.use(cors());
@@ -20,10 +19,10 @@ app.get('/health', (_req, res) => {
 });
 
 app.post('/api/optimize', async (req, res) => {
-  const { runId, symbolsRaw, periodSplit: rawSplit, enabledStages } = req.body;
+  const { runId, symbolsData: rawSymbolsData, periodSplit: rawSplit, config: userConfig, mode, enabled_stages } = req.body;
 
-  if (!runId || !symbolsRaw || !rawSplit) {
-    return res.status(400).json({ error: 'Missing runId, symbolsRaw, or periodSplit' });
+  if (!runId || !rawSymbolsData || !rawSplit) {
+    return res.status(400).json({ error: 'Missing runId, symbolsData, or periodSplit' });
   }
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
@@ -31,19 +30,19 @@ app.post('/api/optimize', async (req, res) => {
   res.json({ accepted: true, runId, build: OPTIMIZER_BUILD });
 
   try {
-    const symbolsData: SymbolData[] = [];
-    for (const raw of symbolsRaw) {
-      const candles = raw.csvText ? parseCSV(raw.csvText) : (raw.candles || []);
+    // Edge function already sends parsed candles with timestamps as numbers
+    const symbolsData: SymbolData[] = rawSymbolsData.map((raw: any) => {
+      const candles = raw.candles || [];
       const timestamps = candles.map((c: any) => c.timestamp);
       const minTs = Math.min(...timestamps);
       const maxTs = Math.max(...timestamps);
-      symbolsData.push({
+      return {
         symbol: raw.symbol,
         candles,
         startDate: new Date(minTs),
         endDate: new Date(maxTs),
-      });
-    }
+      };
+    });
 
     const periodSplit: PeriodSplit = {
       trainStartDate: new Date(rawSplit.trainStartDate),
@@ -53,14 +52,14 @@ app.post('/api/optimize', async (req, res) => {
       trainPercent: rawSplit.trainPercent,
     };
 
-    const config = NNE_PRESET_CONFIG as ExtendedStocksOptimizationConfig;
+    const config = (userConfig || NNE_PRESET_CONFIG) as ExtendedStocksOptimizationConfig;
     let lastUpdate = 0;
 
     const result = await runSmartOptimization(
       symbolsData,
       config,
       periodSplit,
-      'single',
+      mode || 'single',
       {},
       async (info: SmartProgressInfo) => {
         const now = Date.now();
@@ -80,7 +79,7 @@ app.post('/api/optimize', async (req, res) => {
       'profit',
       true,
       true,
-      enabledStages,
+      enabled_stages,
     );
 
     const best = result.finalResult?.bestForProfit;
@@ -95,7 +94,7 @@ app.post('/api/optimize', async (req, res) => {
     }).eq('id', runId);
 
     if (best) {
-      const symbols = symbolsData.map(s => s.symbol);
+      const symbols = symbolsData.map((s: SymbolData) => s.symbol);
       await supabase.from('optimization_results').insert({
         symbol: symbols.join(','),
         parameters: best.parameters as any,
