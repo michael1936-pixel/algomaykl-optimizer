@@ -4,7 +4,7 @@
  */
 import type { Candle, ExtendedStocksStrategyParameters } from './types';
 import {
-  calculateRSI, calculateEMA, calculateATR, calculateBBPine,
+  calculateRSIPine, calculateATRPine, calculateBBPine,
   calculateADXPine, calculateEMAPine
 } from './indicators';
 import { StrategyIndicators } from './strategies';
@@ -72,6 +72,10 @@ function getIndicatorParamsKey(params: ExtendedStocksStrategyParameters, dataset
     params.s1_bb_len ?? 20, params.s1_bb_mult ?? 2.2,
     params.s1_ema_fast_len ?? 9, params.s1_ema_mid_len ?? 21, params.s1_ema_trend_len ?? 50,
     params.bb2_adx_len ?? 11, params.bb2_bb_len ?? 20, params.bb2_bb_mult ?? 2.2,
+    // S3/S5 range + squeeze (added to cache)
+    params.s3_breakout_len ?? 20,
+    params.s5_squeeze_len ?? 5,
+    params.s5_range_len ?? 10,
   ].join('|');
   // Include dataset identity to prevent cross-symbol/train-test cache collisions
   return datasetId ? `${datasetId}::${paramPart}` : paramPart;
@@ -96,19 +100,30 @@ export function precomputeIndicators(candles: Candle[], params: ExtendedStocksSt
   const emaMidLen = params.s1_ema_mid_len ?? 21;
   const emaTrendLen = params.s1_ema_trend_len ?? 50;
 
-  const rsiArr = calculateRSI(closes, params.s1_rsi_len);
-  const atrArr = calculateATR(highs, lows, closes, params.s1_atr_len);
+  // All indicators now return full-length arrays (index-aligned with candles)
+  const rsiArr = calculateRSIPine(closes, params.s1_rsi_len);
+  const atrArr = calculateATRPine(highs, lows, closes, params.s1_atr_len);
   const avgAtrArr = simpleSMA(atrArr, params.s1_atr_ma_len);
   const volMaArr = simpleSMA(vols, params.s1_vol_len);
-  const emaTrendArr = calculateEMA(closes, emaTrendLen);
-  const ema9Arr = calculateEMA(closes, emaFastLen);
-  const ema21Arr = calculateEMA(closes, emaMidLen);
-  const ema100Arr = calculateEMA(closes, params.bb2_ma_len ?? 100);
+  const emaTrendArr = calculateEMAPine(closes, emaTrendLen);
+  const ema9Arr = calculateEMAPine(closes, emaFastLen);
+  const ema21Arr = calculateEMAPine(closes, emaMidLen);
+  const ema100Arr = calculateEMAPine(closes, params.bb2_ma_len ?? 100);
   const adxCalcArr = calculateADXPine(highs, lows, closes, params.s1_adx_len ?? 14);
   const bbCalc = calculateBBPine(closes, params.s1_bb_len ?? 20, params.s1_bb_mult ?? 2.2);
 
   // S2 BB — compute ONCE instead of 3 times
   const s2BbCalc = calculateBBPine(closes, params.bb2_bb_len ?? 20, params.bb2_bb_mult ?? 2.2);
+
+  // S3/S5 range + S5 squeeze ATR-MA — cached (was inline in strategies.ts)
+  const s3Len = params.s3_breakout_len ?? 20;
+  const s5RngLen = params.s5_range_len ?? 10;
+  const s5SqLen = params.s5_squeeze_len ?? 5;
+  const s3RangeHigh = rollingHighest(highs, s3Len);
+  const s3RangeLow = rollingLowest(lows, s3Len);
+  const s5RangeHigh = rollingHighest(highs, s5RngLen);
+  const s5RangeLow = rollingLowest(lows, s5RngLen);
+  const s5AtrMa = simpleSMA(atrArr, s5SqLen);
 
   const indicators: StrategyIndicators = {
     rsi: rsiArr, ema9: ema9Arr, ema21: ema21Arr, ema50: emaTrendArr,
@@ -121,6 +136,10 @@ export function precomputeIndicators(candles: Candle[], params: ExtendedStocksSt
     s2BbUpper: s2BbCalc.upper,
     s2BbLower: s2BbCalc.lower,
     s2Ema100: calculateEMAPine(closes, params.bb2_ma_len ?? 100),
+    // S3/S5 cached ranges & ATR-MA
+    s3RangeHigh, s3RangeLow,
+    s5RangeHigh, s5RangeLow,
+    s5AtrMa,
   };
 
   return {

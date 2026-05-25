@@ -30,7 +30,7 @@ export const NNE_PRESET_CONFIG = {
   // General
   ma_len: { min: 50, max: 50, step: 1 },
   non_regress_stop: false, prefer_tp_priority: true, close_only_trail: false,
-  stop_on_close_only: false,
+  stop_on_close_only: false, use_tv_stop_precedence: true,
   avoid_opening_bar: false, block_close_bar: false,
 
   // Advanced filters

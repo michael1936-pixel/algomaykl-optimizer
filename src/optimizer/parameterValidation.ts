@@ -19,6 +19,30 @@ const MIN_CONSTRAINTS: Record<string, number> = {
   atr_mult_long: 0.2,
   atr_mult_short: 0.2,
   bars_between_trades: 0,
+
+  // Length params — must be >= 1 for Pine Script ta.* functions
+  ma_len: 1,
+  s1_ema_fast_len: 1,
+  s1_ema_mid_len: 1,
+  s1_ema_trend_len: 1,
+  s1_rsi_len: 1,
+  s1_atr_len: 1,
+  s1_atr_ma_len: 1,
+  s1_adx_len: 1,
+  s1_bb_len: 1,
+  s1_vol_len: 1,
+  s1_min_conds: 1,
+  bb2_ma_len: 1,
+  bb2_adx_len: 1,
+  bb2_adx_max: 1,
+  bb2_bb_len: 1,
+  bb2_bb_mult: 0.1,
+  s3_breakout_len: 1,
+  s5_squeeze_len: 1,
+  s5_range_len: 1,
+  vix_lookback_bars: 1,
+  min_bars_post_trail: 1,
+  min_bars_in_trade_exit: 1,
 };
 
 export function getMinConstraint(paramKey: string): number {

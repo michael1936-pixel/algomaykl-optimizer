@@ -237,3 +237,37 @@ export function calculateADXS2(highs: number[], lows: number[], closes: number[]
 export function calculateEMA100S2(data: number[], period: number = 100): number[] {
   return calculateEMAPine(data, period);
 }
+
+/** Pine-aligned RSI — full-length array with NaN padding, index-aligned to candles */
+export function calculateRSIPine(closes: number[], period: number = 14): number[] {
+  const result = new Array(closes.length).fill(NaN);
+  if (closes.length < period + 1) return result;
+  const gains: number[] = [NaN];
+  const losses: number[] = [NaN];
+  for (let i = 1; i < closes.length; i++) {
+    const change = closes[i] - closes[i - 1];
+    gains.push(change > 0 ? change : 0);
+    losses.push(change < 0 ? -change : 0);
+  }
+  const rmaGains = calculateRMAPine(gains, period);
+  const rmaLosses = calculateRMAPine(losses, period);
+  for (let i = 0; i < closes.length; i++) {
+    if (isNaN(rmaGains[i]) || isNaN(rmaLosses[i])) continue;
+    if (rmaLosses[i] === 0) { result[i] = 100; }
+    else { const rs = rmaGains[i] / rmaLosses[i]; result[i] = 100 - (100 / (1 + rs)); }
+  }
+  return result;
+}
+
+/** Pine-aligned ATR — full-length array with NaN padding, index-aligned to candles */
+export function calculateATRPine(highs: number[], lows: number[], closes: number[], period: number = 14): number[] {
+  const len = highs.length;
+  const result = new Array(len).fill(NaN);
+  if (len < period + 1) return result;
+  // TR array: index 0 = NaN (no previous close), index 1+ = true range
+  const tr: number[] = [NaN];
+  for (let i = 1; i < len; i++) {
+    tr.push(Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1])));
+  }
+  return calculateRMAPine(tr, period);
+}

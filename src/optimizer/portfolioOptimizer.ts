@@ -9,7 +9,9 @@ import type {
 } from './types';
 import { runPortfolioBacktest, preFilterSymbols, PreFilteredSymbolData } from './portfolioSimulator';
 import { IndicatorCacheManager } from './indicatorCache';
-import { WorkerPool, WorkerResult } from './workerPool';
+
+export const ENGINE_BUILD = 'pine-parity-v1';
+
 
 /** Insert into a sorted-descending top-N array, maintaining max size */
 function insertTopN(
@@ -34,6 +36,8 @@ export interface ProgressInfo {
   total: number;
   bestReturn?: number;
   bestTestReturn?: number;
+  totalTrades?: number;
+  winRate?: number;
   combinationsPerSecond?: number;
   elapsedTime?: number;
   cacheHits?: number;
@@ -114,32 +118,9 @@ export function markBestCacheEntryProtected(cache: CombinationCache, stage: numb
   if (bestKey) { const e = cache.get(bestKey); if (e) e.protected = true; }
 }
 
-/** Minimum combos threshold for using worker threads */
-const WORKER_THRESHOLD = 500;
-
-/** Shared worker pool instance — reused across stages */
-let sharedPool: WorkerPool | null = null;
-
-function getWorkerPool(): WorkerPool {
-  if (!sharedPool) {
-    sharedPool = new WorkerPool();
-    console.log(`[WorkerPool] Created pool with ${sharedPool.getWorkerCount()} workers`);
-  }
-  return sharedPool;
-}
-
-/** Check if we're in a Node.js environment with worker_threads */
-function canUseWorkers(): boolean {
-  try {
-    require('worker_threads');
-    return typeof process !== 'undefined' && typeof process.versions?.node === 'string';
-  } catch {
-    return false;
-  }
-}
 
 function buildParamsFromCombo(combo: Record<string, number>, ext: any): ExtendedStocksStrategyParameters {
-  return {
+  const params = {
     ...combo,
     non_regress_stop: ext.non_regress_stop, prefer_tp_priority: ext.prefer_tp_priority,
     close_only_trail: ext.close_only_trail, allow_flip_L2S: ext.allow_flip_L2S, allow_flip_S2L: ext.allow_flip_S2L,
@@ -158,6 +139,23 @@ function buildParamsFromCombo(combo: Record<string, number>, ext: any): Extended
     use_vix_exit_long: false, use_vix_exit_short: false, use_vix_freeze: false,
     vix_lookback_bars: 1, vix_spike_pct: 8, vix_freeze_bars: 1,
   } as ExtendedStocksStrategyParameters;
+
+  // ═══ PINE PARITY PIN ═══
+  // These params are NOT exported by formatParametersAsPineScript / not declared in
+  // the Pine template. To guarantee Optimizer result == Backtest result == TradingView,
+  // we force them to the SAME values that Pine uses (hardcoded defaults / no-ops).
+  // Without this pin, the Optimizer would explore e.g. EMA_mid=15 while Pine always
+  // uses EMA_mid=21, producing different signals on the same data.
+  params.s1_ema_fast_len = 9;
+  params.s1_ema_mid_len = 21;
+  params.s1_ema_trend_len = 50;
+  params.min_bars_in_trade_exit = 1; // Pine has no such guard → use minimum no-op
+  params.signals_on_close = true;     // Pine signals always fire on close
+  params.exit_all_now = false;
+  params.block_new_entries = false;
+  (params as any).engine_build = ENGINE_BUILD;
+
+  return params;
 }
 
 export async function optimizePortfolio(
@@ -205,15 +203,14 @@ export async function optimizePortfolio(
   if (!indicatorCache) indicatorCache = new IndicatorCacheManager();
 
   let current = 0, bestTrainReturn = -Infinity, bestTestReturn = -Infinity, cacheHits = 0;
+  let bestTotalTrades = 0, bestWinRate = 0;
   let multiResult = createEmptyMultiObjectiveResult('profit');
   const allResults: Array<{ params: ExtendedStocksStrategyParameters; trainReturn: number }> = [];
   const startTime = Date.now();
 
-  // Generate ALL combinations first
+  // Single-pass: check cache + compute inline — zero intermediate arrays
   const indices = new Array(rangeKeys.length).fill(0);
   const lengths = rangeArrays.map(a => a.length);
-
-  const uncachedCombos: Array<{ params: ExtendedStocksStrategyParameters; key: string }> = [];
 
   for (let iter = 0; iter < totalCombos; iter++) {
     if (signal?.aborted) break;
@@ -223,81 +220,15 @@ export async function optimizePortfolio(
 
     const params = buildParamsFromCombo(combo, ext);
     const key = comboKey(params);
+    current++;
 
     if (combinationCache?.has(key)) {
       const cached = combinationCache.get(key)!;
       cacheHits++;
-      current++;
       if (cached.trainReturn > bestTrainReturn) { bestTrainReturn = cached.trainReturn; bestTestReturn = cached.testReturn; }
       if (collectAllResults) insertTopN(allResults, { params, trainReturn: cached.trainReturn }, 200);
     } else {
-      uncachedCombos.push({ params, key });
-    }
-
-    // Advance indices
-    for (let j = rangeKeys.length - 1; j >= 0; j--) {
-      indices[j]++;
-      if (indices[j] < lengths[j]) break;
-      indices[j] = 0;
-    }
-  }
-
-  console.log(`[Optimizer] Total: ${totalCombos}, Cached: ${cacheHits}, To compute: ${uncachedCombos.length}`);
-
-  // Decide: parallel workers or sequential
-  const useWorkers = canUseWorkers() && uncachedCombos.length >= WORKER_THRESHOLD;
-
-  if (useWorkers) {
-    // ═══ PARALLEL PATH: Worker Threads ═══
-    console.log(`[Optimizer] Using worker threads for ${uncachedCombos.length} combinations`);
-    const pool = getWorkerPool();
-
-    let workerProcessed = 0;
-    const workerResults = await pool.runBatch(
-      uncachedCombos, symbolsData, periodSplit, mode, simConfig, preFiltered!,
-      (processed) => {
-        workerProcessed = processed;
-        current = cacheHits + workerProcessed;
-        const elapsed = (Date.now() - startTime) / 1000;
-        const cps = current / Math.max(elapsed, 0.001);
-        onProgress({ current, total: totalCombos, bestReturn: bestTrainReturn, bestTestReturn, combinationsPerSecond: cps, elapsedTime: elapsed, cacheHits, cacheSize: combinationCache?.size });
-      }
-    );
-
-    // Process worker results
-    for (const wr of workerResults) {
-      if (wr.valid && wr.portfolioResult) {
-        const portfolioResult = {
-          mode: preFiltered!.length === 1 ? 'single' as const : 'portfolio' as const,
-          trainPeriod: periodSplit,
-          trainResults: wr.portfolioResult.trainResults,
-          testResults: wr.portfolioResult.testResults,
-          totalTrainReturn: wr.trainReturn,
-          totalTestReturn: wr.testReturn,
-          overfit: wr.trainReturn > 0 ? Math.abs(wr.trainReturn - wr.testReturn) / wr.trainReturn : 0,
-          parameters: wr.params, monthlyPerformance: [], initialCapital: 10000,
-        };
-        multiResult = updateMultiObjectiveResult(multiResult, portfolioResult);
-        if (wr.trainReturn > bestTrainReturn) { bestTrainReturn = wr.trainReturn; bestTestReturn = wr.testReturn; }
-        if (combinationCache) {
-          combinationCache.set(wr.key, {
-            parameters: wr.params, trainReturn: wr.trainReturn, testReturn: wr.testReturn,
-            stageNumber, roundNumber, timestamp: Date.now(),
-            strategyEnables: { enable_strat1: wr.params.enable_strat1, enable_strat2: wr.params.enable_strat2, enable_strat3: wr.params.enable_strat3, enable_strat4: wr.params.enable_strat4, enable_strat5: wr.params.enable_strat5 },
-          });
-        }
-        if (collectAllResults) insertTopN(allResults, { params: wr.params, trainReturn: wr.trainReturn }, 200);
-      }
-    }
-    current = totalCombos;
-  } else {
-    // ═══ SEQUENTIAL PATH: Main thread (original logic) ═══
-    for (let i = 0; i < uncachedCombos.length; i++) {
-      if (signal?.aborted) break;
-
-      const { params, key } = uncachedCombos[i];
       const result = runPortfolioBacktest(symbolsData, params, periodSplit, mode, simConfig, preFiltered, indicatorCache);
-      current = cacheHits + i + 1;
 
       if (typeof result.totalTrainReturn === 'number' && !isNaN(result.totalTrainReturn)) {
         const portfolioResult = {
@@ -310,7 +241,13 @@ export async function optimizePortfolio(
           parameters: params, monthlyPerformance: [], initialCapital: 10000,
         };
         multiResult = updateMultiObjectiveResult(multiResult, portfolioResult);
-        if (result.totalTrainReturn > bestTrainReturn) { bestTrainReturn = result.totalTrainReturn; bestTestReturn = result.totalTestReturn; }
+        if (result.totalTrainReturn > bestTrainReturn) {
+          bestTrainReturn = result.totalTrainReturn; bestTestReturn = result.totalTestReturn;
+          const tt = result.trainResults?.reduce((s: number, r: any) => s + (r.result?.totalTrades || 0), 0) || 0;
+          const wt = result.trainResults?.reduce((s: number, r: any) => s + (r.result?.winningTrades || 0), 0) || 0;
+          bestTotalTrades = tt;
+          bestWinRate = tt > 0 ? (wt / tt) * 100 : 0;
+        }
         if (combinationCache) {
           combinationCache.set(key, {
             parameters: params, trainReturn: result.totalTrainReturn, testReturn: result.totalTestReturn,
@@ -320,19 +257,27 @@ export async function optimizePortfolio(
         }
         if (collectAllResults) insertTopN(allResults, { params, trainReturn: result.totalTrainReturn }, 200);
       }
+    }
 
-      if (current % 500 === 0 || i === uncachedCombos.length - 1) {
-        const elapsed = (Date.now() - startTime) / 1000;
-        const cps = current / Math.max(elapsed, 0.001);
-        onProgress({ current, total: totalCombos, bestReturn: bestTrainReturn, bestTestReturn, combinationsPerSecond: cps, elapsedTime: elapsed, cacheHits, cacheSize: combinationCache?.size });
-        await new Promise(r => setTimeout(r, 0));
-      }
+    // Progress + yield every 500
+    if (current % 500 === 0 || iter === totalCombos - 1) {
+      const elapsed = (Date.now() - startTime) / 1000;
+      const cps = current / Math.max(elapsed, 0.001);
+      onProgress({ current, total: totalCombos, bestReturn: bestTrainReturn, bestTestReturn, totalTrades: bestTotalTrades, winRate: bestWinRate, combinationsPerSecond: cps, elapsedTime: elapsed, cacheHits, cacheSize: combinationCache?.size });
+      await new Promise(r => setTimeout(r, 0));
+    }
+
+    // Advance indices
+    for (let j = rangeKeys.length - 1; j >= 0; j--) {
+      indices[j]++;
+      if (indices[j] < lengths[j]) break;
+      indices[j] = 0;
     }
   }
 
   // Final progress
   const elapsed = (Date.now() - startTime) / 1000;
-  onProgress({ current: totalCombos, total: totalCombos, bestReturn: bestTrainReturn, bestTestReturn, combinationsPerSecond: totalCombos / Math.max(elapsed, 0.001), elapsedTime: elapsed, cacheHits, cacheSize: combinationCache?.size });
+  onProgress({ current: totalCombos, total: totalCombos, bestReturn: bestTrainReturn, bestTestReturn, totalTrades: bestTotalTrades, winRate: bestWinRate, combinationsPerSecond: totalCombos / Math.max(elapsed, 0.001), elapsedTime: elapsed, cacheHits, cacheSize: combinationCache?.size });
 
   const finalResult: any = {
     bestForProfit: multiResult.bestForProfit ? { ...multiResult.bestForProfit, actualTestedCount: current, stageCacheHits: cacheHits, stageNewCombinations: current - cacheHits } : null,

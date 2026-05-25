@@ -71,6 +71,7 @@ export interface StocksStrategyParameters {
   allow_flip_S2L: boolean;
   bars_between_trades: number;
   stop_on_close_only?: boolean;
+  use_tv_stop_precedence?: boolean;
 }
 
 export type StrategyParameters = StocksStrategyParameters | ExtendedStocksStrategyParameters;

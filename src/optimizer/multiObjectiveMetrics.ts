@@ -63,7 +63,8 @@ export function getMaxDrawdown(result: PortfolioOptimizationResult): number {
 
 export function compareForProfit(current: PortfolioOptimizationResult | null, candidate: PortfolioOptimizationResult): boolean {
   if (!current) return true;
-  return ((candidate.totalTrainReturn + candidate.totalTestReturn) / 2) > ((current.totalTrainReturn + current.totalTestReturn) / 2);
+  // PINE PARITY: rank by train_return only (matches Local Backtest = source of truth)
+  return candidate.totalTrainReturn > current.totalTrainReturn;
 }
 
 export function compareForConsistency(current: PortfolioOptimizationResult | null, _candidate: PortfolioOptimizationResult, currentMetrics?: ConsistencyMetrics, candidateMetrics?: ConsistencyMetrics): boolean {
@@ -97,11 +98,11 @@ export function updateMultiObjectiveResult(multiResult: MultiObjectiveResult, ca
 
 export function evaluateObjective(result: PortfolioOptimizationResult, objective: ObjectiveType): number {
   switch (objective) {
-    case 'profit': return (result.totalTrainReturn + result.totalTestReturn) / 2;
+    case 'profit': return result.totalTrainReturn;
     case 'consistency': return calculateConsistencyMetrics(result.monthlyPerformance).consistencyScore;
     case 'lowDrawdown': return -Math.abs(getMaxDrawdown(result));
     case 'testPeriod': return result.totalTestReturn;
-    default: return (result.totalTrainReturn + result.totalTestReturn) / 2;
+    default: return result.totalTrainReturn;
   }
 }
 

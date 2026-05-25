@@ -37,31 +37,40 @@ export interface StrategySignal {
   sellSignal: boolean;
 }
 
+// ===== DIAGNOSTIC COUNTERS (temporary) =====
+export const __SIG_COUNTERS = {
+  s1: { buy: 0, sell: 0 },
+  s2: { buy: 0, sell: 0 },
+  s3: { buy: 0, sell: 0 },
+  s4: { buy: 0, sell: 0 },
+  s5: { buy: 0, sell: 0 },
+};
+export function __resetSigCounters() {
+  for (const k of Object.keys(__SIG_COUNTERS) as (keyof typeof __SIG_COUNTERS)[]) {
+    __SIG_COUNTERS[k].buy = 0;
+    __SIG_COUNTERS[k].sell = 0;
+  }
+}
+
 // ================= Strategy 1 – EMA Trend =================
 export function strategy1_EMATrend(
   candles: Candle[], index: number, indicators: StrategyIndicators, params: ExtendedStocksStrategyParameters
 ): StrategySignal {
-  const rsiIdx = index - (candles.length - indicators.rsi.length);
-  const ema9Idx = index - (candles.length - indicators.ema9.length);
-  const ema21Idx = index - (candles.length - indicators.ema21.length);
-  const ema50Idx = index - (candles.length - indicators.ema50.length);
-  const atrIdx = index - (candles.length - indicators.atr.length);
-  const adxIdx = index - (candles.length - indicators.adx.length);
-  const bbIdx = index - (candles.length - indicators.bbBasis.length);
-  const volIdx = index - (candles.length - indicators.volumeAvg.length);
+  // All indicator arrays are now index-aligned (full-length with NaN padding)
+  if (index < 1) return { buySignal: false, sellSignal: false };
 
-  if (rsiIdx < 0 || ema9Idx < 1 || ema21Idx < 1 || ema50Idx < 1 || atrIdx < 0 || adxIdx < 0 || bbIdx < 0 || volIdx < 0) {
+  const rsi = indicators.rsi[index];
+  const e9 = indicators.ema9[index], pe9 = indicators.ema9[index - 1];
+  const e21 = indicators.ema21[index], pe21 = indicators.ema21[index - 1];
+  const e50 = indicators.ema50[index], pe50 = indicators.ema50[index - 1];
+  const atr = indicators.atr[index], avgAtr = indicators.atrAvg[index];
+  const adx = indicators.adx[index];
+  const bbU = indicators.bbUpper[index], bbL = indicators.bbLower[index], bbB = indicators.bbBasis[index];
+  const vol = candles[index].volume, avgVol = indicators.volumeAvg[index];
+
+  if (isNaN(rsi) || isNaN(e9) || isNaN(pe9) || isNaN(e21) || isNaN(pe21) || isNaN(e50) || isNaN(pe50) || isNaN(atr) || isNaN(adx) || isNaN(bbU) || isNaN(bbL)) {
     return { buySignal: false, sellSignal: false };
   }
-
-  const rsi = indicators.rsi[rsiIdx];
-  const e9 = indicators.ema9[ema9Idx], pe9 = indicators.ema9[ema9Idx - 1];
-  const e21 = indicators.ema21[ema21Idx], pe21 = indicators.ema21[ema21Idx - 1];
-  const e50 = indicators.ema50[ema50Idx], pe50 = indicators.ema50[ema50Idx - 1];
-  const atr = indicators.atr[atrIdx], avgAtr = indicators.atrAvg[atrIdx];
-  const adx = indicators.adx[adxIdx];
-  const bbU = indicators.bbUpper[bbIdx], bbL = indicators.bbLower[bbIdx], bbB = indicators.bbBasis[bbIdx];
-  const vol = candles[index].volume, avgVol = indicators.volumeAvg[volIdx];
   const close = candles[index].close;
 
   const co21 = pe9 < pe21 && e9 > e21, co50 = pe9 < pe50 && e9 > e50;
@@ -77,19 +86,21 @@ export function strategy1_EMATrend(
 
   const bb = (co21 || co50) && rsi > 50;
   const bs = (cu21 || cu50) && rsi < 50;
-  return {
-    buySignal: bb && sf && rsi > params.rsi_long_entry_min,
-    sellSignal: bs && sf && rsi < params.rsi_short_entry_max
-  };
+  const buy = bb && sf && rsi > params.rsi_long_entry_min;
+  const sell = bs && sf && rsi < params.rsi_short_entry_max;
+  if (buy) __SIG_COUNTERS.s1.buy++;
+  if (sell) __SIG_COUNTERS.s1.sell++;
+  return { buySignal: buy, sellSignal: sell };
 }
 
 // ================= Strategy 2 – Bollinger Mean Reversion =================
 export function strategy2_BollingerMeanReversion(
   candles: Candle[], index: number, indicators: StrategyIndicators, params: ExtendedStocksStrategyParameters
 ): StrategySignal {
-  const adxArr = indicators.s2Adx ?? indicators.adx;
-  const bbUA = indicators.s2BbUpper ?? indicators.bbUpper;
-  const bbLA = indicators.s2BbLower ?? indicators.bbLower;
+  // F-S2-BB + F-S2-ADX: Pine S2 uses S1's global BB and global ADX (not separate s2 versions)
+  const adxArr = indicators.adx;
+  const bbUA = indicators.bbUpper;
+  const bbLA = indicators.bbLower;
   const e100A = indicators.s2Ema100 ?? indicators.ema100;
 
   if (index < 1 || index >= candles.length || index >= indicators.rsi.length ||
@@ -112,29 +123,29 @@ export function strategy2_BollingerMeanReversion(
   const re = adx < params.bb2_adx_max;
   const up = !params.bb2_use_trend_filter || c > ma;
   const dn = !params.bb2_use_trend_filter || c < ma;
-  const lb = re && up && lo < bbL && pc < pbbL && c > bbL;
-  const sb = re && dn && hi > bbU && pc > pbbU && c < bbU;
+  // F-S2-CROSS: Pine uses <= / >= (inclusive) for the prior-bar BB cross
+  const lb = re && up && lo < bbL && pc <= pbbL && c > bbL;
+  const sb = re && dn && hi > bbU && pc >= pbbU && c < bbU;
 
-  return {
-    buySignal: lb && rsi <= params.bb2_rsi_long_max,
-    sellSignal: sb && rsi >= params.bb2_rsi_short_min
-  };
+  const buy = lb && rsi <= params.bb2_rsi_long_max;
+  const sell = sb && rsi >= params.bb2_rsi_short_min;
+  if (buy) __SIG_COUNTERS.s2.buy++;
+  if (sell) __SIG_COUNTERS.s2.sell++;
+  return { buySignal: buy, sellSignal: sell };
 }
 
 // ================= Strategy 3 – Range Breakout =================
 export function strategy3_RangeBreakout(
   candles: Candle[], index: number, indicators: StrategyIndicators, params: ExtendedStocksStrategyParameters
 ): StrategySignal {
-  const ri = index - (candles.length - indicators.rsi.length);
-  const ai = index - (candles.length - indicators.adx.length);
-  const vi = index - (candles.length - indicators.volumeAvg.length);
-
-  if (ri < 0 || ai < 0 || vi < 0 || index < params.s3_breakout_len + 1) {
+  if (index < params.s3_breakout_len + 1) {
     return { buySignal: false, sellSignal: false };
   }
 
-  const rsi = indicators.rsi[ri], adx = indicators.adx[ai];
-  const vol = candles[index].volume, avgV = indicators.volumeAvg[vi];
+  const rsi = indicators.rsi[index], adx = indicators.adx[index];
+  const vol = candles[index].volume, avgV = indicators.volumeAvg[index];
+
+  if (isNaN(rsi) || isNaN(adx)) return { buySignal: false, sellSignal: false };
   const c = candles[index].close, pc = candles[index - 1].close;
 
   let rH: number, rL: number;
@@ -152,22 +163,20 @@ export function strategy3_RangeBreakout(
   let vOk = true;
   if (params.s3_use_vol_filter) vOk = vol > avgV * params.s3_vol_mult;
 
-  return {
-    buySignal: c > rH && pc <= rH && rsi >= params.s3_rsi_long_min && aOk && vOk,
-    sellSignal: c < rL && pc >= rL && rsi <= params.s3_rsi_short_max && aOk && vOk
-  };
+  const buy = c > rH && pc <= rH && rsi >= params.s3_rsi_long_min && aOk && vOk;
+  const sell = c < rL && pc >= rL && rsi <= params.s3_rsi_short_max && aOk && vOk;
+  if (buy) __SIG_COUNTERS.s3.buy++;
+  if (sell) __SIG_COUNTERS.s3.sell++;
+  return { buySignal: buy, sellSignal: sell };
 }
 
 // ================= Strategy 4 – Inside Bar Breakout =================
 export function strategy4_InsideBarBreakout(
   candles: Candle[], index: number, indicators: StrategyIndicators, params: ExtendedStocksStrategyParameters
 ): StrategySignal {
-  const ri = index - (candles.length - indicators.rsi.length);
-  const ei = index - (candles.length - indicators.ema50.length);
+  if (index < 2) return { buySignal: false, sellSignal: false };
 
-  if (ri < 0 || ei < 0 || index < 2) return { buySignal: false, sellSignal: false };
-
-  const rsi = indicators.rsi[ri], ema = indicators.ema50[ei];
+  const rsi = indicators.rsi[index], ema = indicators.ema50[index];
   if (isNaN(rsi) || (params.s4_use_trend_filter && isNaN(ema))) {
     return { buySignal: false, sellSignal: false };
   }
@@ -184,34 +193,35 @@ export function strategy4_InsideBarBreakout(
   if (params.s4_use_trend_filter) { tL = c > ema; tS = c < ema; }
 
   const bU = c > pH && pc <= pH, bD = c < pL && pc >= pL;
-  return {
-    buySignal: ib && rOk && bU && rsi >= params.s4_rsi_long_min && tL,
-    sellSignal: ib && rOk && bD && rsi <= params.s4_rsi_short_max && tS
-  };
+  const buy = ib && rOk && bU && rsi >= params.s4_rsi_long_min && tL;
+  const sell = ib && rOk && bD && rsi <= params.s4_rsi_short_max && tS;
+  if (buy) __SIG_COUNTERS.s4.buy++;
+  if (sell) __SIG_COUNTERS.s4.sell++;
+  return { buySignal: buy, sellSignal: sell };
 }
 
 // ================= Strategy 5 – ATR Squeeze Breakout =================
 export function strategy5_ATRSqueezeBreakout(
   candles: Candle[], index: number, indicators: StrategyIndicators, params: ExtendedStocksStrategyParameters
 ): StrategySignal {
-  const ri = index - (candles.length - indicators.rsi.length);
-  const ai = index - (candles.length - indicators.atr.length);
-  const vi = index - (candles.length - indicators.volumeAvg.length);
-
-  if (ri < 0 || ai < 0 || vi < 0 || index < params.s5_range_len + 1) {
+  if (index < params.s5_range_len) {
     return { buySignal: false, sellSignal: false };
   }
 
-  const rsi = indicators.rsi[ri], atr = indicators.atr[ai], avgAtr = indicators.atrAvg[ai];
-  const vol = candles[index].volume, avgVol = indicators.volumeAvg[vi];
+  const rsi = indicators.rsi[index], atr = indicators.atr[index], avgAtr = indicators.atrAvg[index];
+  const vol = candles[index].volume, avgVol = indicators.volumeAvg[index];
+
+  if (isNaN(rsi) || isNaN(atr) || isNaN(avgAtr)) return { buySignal: false, sellSignal: false };
   const c = candles[index].close, pc = candles[index - 1].close;
 
   let s5m: number;
   if (indicators.s5AtrMa) {
-    s5m = indicators.s5AtrMa[ai];
+    s5m = indicators.s5AtrMa[index];
   } else {
-    if (ai < params.s5_squeeze_len - 1) return { buySignal: false, sellSignal: false };
-    s5m = indicators.atr.slice(ai - params.s5_squeeze_len + 1, ai + 1).reduce((a, b) => a + b, 0) / params.s5_squeeze_len;
+    if (index < params.s5_squeeze_len - 1) return { buySignal: false, sellSignal: false };
+    let atrSum = 0;
+    for (let j = index - params.s5_squeeze_len + 1; j <= index; j++) atrSum += indicators.atr[j];
+    s5m = atrSum / params.s5_squeeze_len;
   }
 
   const th = avgAtr * params.s5_atr_mult_low;
@@ -229,15 +239,13 @@ export function strategy5_ATRSqueezeBreakout(
   }
 
   let vOk = true;
-  if (params.s5_use_vol_filter) {
-    if (vol === 0 || !avgVol || avgVol === 0) vOk = true;
-    else vOk = vol > avgVol * params.s5_vol_mult;
-  }
+  if (params.s5_use_vol_filter) vOk = vol > avgVol * params.s5_vol_mult;
 
-  return {
-    buySignal: sq && c > rH && pc <= rH && rsi >= params.s5_rsi_long_min && vOk,
-    sellSignal: sq && c < rL && pc >= rL && rsi <= params.s5_rsi_short_max && vOk
-  };
+  const buy = sq && c > rH && pc <= rH && rsi >= params.s5_rsi_long_min && vOk;
+  const sell = sq && c < rL && pc >= rL && rsi <= params.s5_rsi_short_max && vOk;
+  if (buy) __SIG_COUNTERS.s5.buy++;
+  if (sell) __SIG_COUNTERS.s5.sell++;
+  return { buySignal: buy, sellSignal: sell };
 }
 
 export function resetS5DebugCounter() {}

@@ -30,6 +30,8 @@ export interface SmartProgressInfo {
   stageDescription: string;
   bestReturn?: number;
   bestTestReturn?: number;
+  totalTrades?: number;
+  winRate?: number;
 }
 
 export interface StageResult {
@@ -95,7 +97,9 @@ const STAGE_FILTER_KEYS: Record<number, string> = { 3: 'bb2_use_trend_filter', 4
 const BASE_STAGES: Omit<OptimizationStage, 'roundNumber'>[] = [
   { name: 'ניהול לונג', description: 'Long management', parametersToOptimize: ['stop_distance_percent_long', 'trail_rsi_pct_input_long', 'tp_percent_long', 'tp_trail_distance_long', 'rsi_long_entry_min', 'rsi_trail_long'] },
   { name: 'ניהול שורט', description: 'Short management', parametersToOptimize: ['stop_distance_percent_short', 'trail_rsi_pct_input_short', 'tp_percent_short', 'tp_trail_distance_short', 'rsi_short_entry_max', 'rsi_trail_short'] },
-  { name: 'אסטרטגיה 1 EMA Trend', description: 'S1', parametersToOptimize: ['s1_ema_fast_len', 's1_ema_mid_len', 's1_ema_trend_len', 's1_rsi_len', 's1_atr_len', 's1_atr_ma_len', 's1_atr_hi_mult', 's1_adx_len', 's1_adx_strong', 's1_bb_len', 's1_bb_mult', 's1_far_from_bb_pc', 's1_vol_len', 's1_hi_vol_mult', 's1_min_conds'] },
+  // PINE PARITY: s1_ema_fast_len/mid_len/trend_len are NOT in Pine template — they are
+  // pinned to 9/21/50 in buildParamsFromCombo. Do NOT optimize them.
+  { name: 'אסטרטגיה 1 EMA Trend', description: 'S1', parametersToOptimize: ['s1_rsi_len', 's1_atr_len', 's1_atr_ma_len', 's1_atr_hi_mult', 's1_adx_len', 's1_adx_strong', 's1_bb_len', 's1_bb_mult', 's1_far_from_bb_pc', 's1_vol_len', 's1_hi_vol_mult', 's1_min_conds'] },
   { name: 'אסטרטגיה 2 Bollinger', description: 'S2', parametersToOptimize: ['enable_strat2', 'bb2_use_trend_filter', 'bb2_ma_len', 'bb2_adx_max', 'bb2_rsi_long_max', 'bb2_rsi_short_min'] },
   { name: 'אסטרטגיה 3 Breakout', description: 'S3', parametersToOptimize: ['enable_strat3', 's3_use_vol_filter', 's3_breakout_len', 's3_adx_min', 's3_vol_mult', 's3_rsi_long_min', 's3_rsi_short_max'] },
   { name: 'אסטרטגיה 4 Inside Bar', description: 'S4', parametersToOptimize: ['enable_strat4', 's4_use_trend_filter', 's4_min_inside_range_pc', 's4_rsi_long_min', 's4_rsi_short_max'] },
@@ -177,7 +181,9 @@ function generateDynamicStages(stepMult: number = 4): OptimizationStage[] {
   stages.push({ name: 'מסנן Big Bar', description: 'Big bar filter', parametersToOptimize: ['use_big_bar_filter', 'big_bar_atr_mult'], roundNumber: 3, customRanges: { big_bar_atr_mult: { min: 2, max: 8, step: 0.1 } } });
   stages.push({ name: 'מסנן מרחק EMA50', description: 'Distance filter', parametersToOptimize: ['use_dist_filter', 'max_dist_from_ema50_pc'], roundNumber: 3, customRanges: { max_dist_from_ema50_pc: { min: 13, max: 25, step: 0.5 } } });
   stages.push({ name: 'סטופ ATR', description: 'ATR stop', parametersToOptimize: ['use_atr_sl', 'atr_mult_long', 'atr_mult_short'], roundNumber: 3, customRanges: { atr_mult_long: { min: 0.2, max: 3, step: 0.1 }, atr_mult_short: { min: 0.2, max: 3, step: 0.1 } } });
-  stages.push({ name: 'יציאה RSI', description: 'RSI exit', parametersToOptimize: ['enable_rsi_exit', 'rsi_exit_long', 'rsi_exit_short', 'min_bars_in_trade_exit'], roundNumber: 3, customRanges: { rsi_exit_long: { min: 40, max: 75, step: 1 }, rsi_exit_short: { min: 20, max: 60, step: 1 }, min_bars_in_trade_exit: { min: 2, max: 12, step: 1 } } });
+  // PINE PARITY: min_bars_in_trade_exit is NOT in Pine template — pinned to 1 in
+  // buildParamsFromCombo. Do NOT optimize it.
+  stages.push({ name: 'יציאה RSI', description: 'RSI exit', parametersToOptimize: ['enable_rsi_exit', 'rsi_exit_long', 'rsi_exit_short'], roundNumber: 3, customRanges: { rsi_exit_long: { min: 40, max: 75, step: 1 }, rsi_exit_short: { min: 20, max: 60, step: 1 } } });
   stages.push({ name: 'חסימת נרות', description: 'Bar blocking', parametersToOptimize: ['avoid_opening_bar', 'block_close_bar'], roundNumber: 3 });
   stages.push({ name: 'מרווח עסקאות', description: 'Bars between trades', parametersToOptimize: ['bars_between_trades'], roundNumber: 3, customRanges: { bars_between_trades: { min: 1, max: 15, step: 1 } } });
 
@@ -480,7 +486,7 @@ export async function runSmartOptimization(
         try {
           const comboResult = await optimizePortfolio(
             symbolsData, comboCfg, periodSplit, mode, simulationConfig,
-            (info) => onProgress?.({ ...info, current: ci, total: STRATEGY_COMBOS.length, currentStage: si + 1, totalStages: stages.length, stageName: `${stage.name} (${ci + 1}/${STRATEGY_COMBOS.length})`, stageDescription: stage.description, bestReturn: info.bestReturn, bestTestReturn: info.bestTestReturn }),
+            (info) => onProgress?.({ ...info, current: ci, total: STRATEGY_COMBOS.length, currentStage: si + 1, totalStages: stages.length, stageName: `${stage.name} (${ci + 1}/${STRATEGY_COMBOS.length})`, stageDescription: stage.description, bestReturn: info.bestReturn, bestTestReturn: info.bestTestReturn, totalTrades: info.totalTrades, winRate: info.winRate }),
             abortSignal, undefined, false, 'profit', cache, si + 1, stage.roundNumber, preFiltered, indicatorCache,
           );
           if (comboResult.bestForProfit) {
@@ -660,7 +666,7 @@ export async function runSmartOptimization(
       const collectAll = stage.roundNumber === 1;
       const result = await optimizePortfolio(
         symbolsData, stageCfg, periodSplit, mode, simulationConfig,
-        (info) => onProgress?.({ ...info, current: info.current, total: info.total, currentStage: si + 1, totalStages: stages.length, stageName: stage.name, stageDescription: stage.description, bestReturn: Math.max(globalBestTrain, info.bestReturn || 0), bestTestReturn: Math.max(globalBestTest, info.bestTestReturn || 0) }),
+        (info) => onProgress?.({ ...info, current: info.current, total: info.total, currentStage: si + 1, totalStages: stages.length, stageName: stage.name, stageDescription: stage.description, bestReturn: Math.max(globalBestTrain, info.bestReturn || 0), bestTestReturn: Math.max(globalBestTest, info.bestTestReturn || 0), totalTrades: info.totalTrades, winRate: info.winRate }),
         abortSignal, undefined, false, 'profit', cache, si + 1, stage.roundNumber, preFiltered, indicatorCache, collectAll,
       );
 
